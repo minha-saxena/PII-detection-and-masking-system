@@ -1,0 +1,33 @@
+# FastAPI and server
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+
+# PDF processing
+docling==1.0.0
+PyPDF2==3.0.1
+reportlab==4.0.9
+Pillow==10.2.0
+
+# NLP and ML
+spacy==3.7.2
+en-core-web-trf @ https://github.com/explosion/spacy-models/releases/download/en_core_web_trf-3.7.2/en_core_web_trf-3.7.2-py3-none-any.whl
+
+# Ollama client
+ollama==0.1.6
+
+# Data validation
+pydantic>=2.7,<3.0
+pydantic-settings>=2.3,<3.0
+
+# Utilities
+python-dotenv==1.0.0
+aiofiles==23.2.1
+httpx==0.25.2
+
+# Logging
+loguru==0.7.2
+
+# Testing
+pytest==7.4.4
+pytest-asyncio==0.23.3
