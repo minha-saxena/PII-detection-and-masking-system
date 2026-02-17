@@ -6,7 +6,7 @@ import spacy
 from detectors.base import BaseDetector
 from models.schemas import Detection
 from core.logger import log
-
+import asyncio
 
 class NERDetector(BaseDetector):
     """Detects PII using spaCy Named Entity Recognition"""
@@ -31,12 +31,12 @@ class NERDetector(BaseDetector):
             self.nlp = spacy.load(model_name)
             log.info("spaCy model loaded successfully")
         except OSError:
-            log.error(f"spaCy model {model_name} not found. Downloading...")
+            log.warning(f"spaCy model {model_name} not found. Falling back to en_core_web_sm...")
             # Fallback to smaller model if transformer not available
             try:
                 self.nlp = spacy.load("en_core_web_sm")
                 log.warning("Using en_core_web_sm as fallback")
-            except:
+            except OSError:
                 log.error("Failed to load any spaCy model")
                 raise
     
@@ -57,8 +57,7 @@ class NERDetector(BaseDetector):
         log.debug(f"NERDetector: Processing {len(text)} characters")
         
         # Process text with spaCy
-        doc = self.nlp(text)
-        
+        doc = await asyncio.to_thread(self.nlp, text)     
         for ent in doc.ents:
             # Map spaCy entity type to our PII type
             pii_type = self.ENTITY_TYPE_MAPPING.get(ent.label_, ent.label_.lower())
@@ -103,7 +102,7 @@ class NERDetector(BaseDetector):
         length_factor = min(len(entity.text) / 10.0, 1.0)
         
         # Adjust based on capitalization (proper nouns more reliable)
-        if entity.text[0].isupper():
+        if entity.text and entity.text[0].isupper():
             cap_factor = 1.0
         else:
             cap_factor = 0.9

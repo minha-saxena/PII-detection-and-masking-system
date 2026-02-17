@@ -19,6 +19,7 @@ from models.job import job_store, Job
 from core.config import settings
 from core.logger import log
 from api.processor import PIIProcessor
+# import magic
 
 router = APIRouter()
 processor = PIIProcessor()
@@ -46,13 +47,22 @@ async def upload_document(
                 status_code=400,
                 detail="Only PDF files are supported"
             )
-        
+        # Validate actual content type
+        # content = await file.read(1024)
+        # await file.seek(0)
+        # mime = magic.from_buffer(content, mime=True)
+        # if mime != 'application/pdf':
+        #     raise HTTPException(
+        #         status_code=400,
+        #         detail="File content is not a valid PDF"
+        #    )
+
         # Parse tags
         user_tags = None
         if tags:
             try:
                 user_tags = json.loads(tags) if isinstance(tags, str) else tags
-            except:
+            except json.JSONDecodeError:
                 # Try comma-separated
                 user_tags = [t.strip() for t in tags.split(',')]
         
@@ -92,7 +102,7 @@ async def upload_document(
         raise
     except Exception as e:
         log.error(f"Upload failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error during file upload")
 
 
 @router.get("/status/{job_id}", response_model=StatusResponse)
@@ -147,6 +157,12 @@ async def download_masked_pdf(job_id: str):
     if not job.masked_file_path or not os.path.exists(job.masked_file_path):
         raise HTTPException(status_code=404, detail="Masked file not found")
     
+    # Ensure file is within expected directory
+    real_path = os.path.realpath(job.masked_file_path)
+    if not real_path.startswith(os.path.realpath(settings.OUTPUT_DIR)):
+        log.error(f"Path traversal attempt detected for job {job_id}")
+        raise HTTPException(status_code=404, detail="Masked file not found")
+    
     return FileResponse(
         job.masked_file_path,
         media_type="application/pdf",
@@ -175,6 +191,14 @@ async def get_detection_report(job_id: str):
             status_code=400,
             detail=f"Job not completed. Current status: {job.status}"
         )
+    def mask_pii_value(value: str, pii_type: str) -> str:
+        """Partially mask PII values for reporting"""
+        if len(value) <= 4:
+            return "*" * len(value)
+        return value[:2] + "*" * (len(value) - 4) + value[-2:]
+
+    for d in job.detections:
+        log.info(f"Value: {d.value}, Masked: {mask_pii_value(d.value, d.type)}, Type: {d.type} Confidence: {d.confidence}")
     
     return {
         "job_id": job.job_id,
@@ -183,7 +207,7 @@ async def get_detection_report(job_id: str):
         "detections": [
             {
                 "type": d.type,
-                "value": d.value,
+                "value": mask_pii_value(d.value, d.type),
                 "start_pos": d.start_pos,
                 "end_pos": d.end_pos,
                 "confidence": d.confidence,
@@ -212,7 +236,8 @@ async def health_check():
         slm = SLMDetector()
         ollama_healthy = await slm.check_ollama_health()
         ollama_status = "connected" if ollama_healthy else "unavailable"
-    except:
+    except Exception as e:
+        log.warning(f"Ollama health check failed: {e}")
         ollama_status = "error"
     
     return HealthResponse(
@@ -239,12 +264,22 @@ async def delete_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     
+    # Prevent deletion of jobs currently being processed
+    if job.status == JobStatus.PROCESSING:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot delete job while processing"
+        )
+
     # Delete files
-    if job.original_file_path and os.path.exists(job.original_file_path):
-        os.remove(job.original_file_path)
-    
-    if job.masked_file_path and os.path.exists(job.masked_file_path):
-        os.remove(job.masked_file_path)
+    try:
+        if job.original_file_path and os.path.exists(job.original_file_path):
+            os.remove(job.original_file_path)
+        
+        if job.masked_file_path and os.path.exists(job.masked_file_path):
+            os.remove(job.masked_file_path)
+    except OSError as e:
+        log.warning(f"Failed to delete files for job {job_id}: {e}")
     
     # Delete job
     job_store.delete_job(job_id)

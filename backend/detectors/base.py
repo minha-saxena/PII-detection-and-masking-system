@@ -67,7 +67,7 @@ class BaseDetector(ABC):
             previous = merged[-1]
             
             # Check for overlap
-            if current.start_pos <= previous.end_pos:
+            if current.start_pos <= previous.end_pos and current.type == previous.type:
                 # Keep detection with higher confidence
                 if current.confidence > previous.confidence:
                     merged[-1] = current

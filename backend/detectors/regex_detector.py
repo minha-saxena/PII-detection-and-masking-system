@@ -139,10 +139,19 @@ class RegexDetector(BaseDetector):
         Args:
             pii_type: Type of PII
             pattern: Regex pattern string
+        Raises:
+            ValueError: If pattern is invalid regex
         """
+        try:
+            compiled = re.compile(pattern)
+        except re.error as e:
+            log.error(f"Invalid regex pattern for {pii_type}: {e}")
+            raise ValueError(f"Invalid regex pattern: {e}") from e
+        
         self.patterns[pii_type] = pattern
-        self.compiled_patterns[pii_type] = re.compile(pattern)
+        self.compiled_patterns[pii_type] = compiled
         log.info(f"Added custom pattern for {pii_type}")
+
     
     def remove_pattern(self, pii_type: str):
         """

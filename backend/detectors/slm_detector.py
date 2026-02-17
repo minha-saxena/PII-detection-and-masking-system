@@ -67,6 +67,12 @@ class SLMDetector(BaseDetector):
         Returns:
             Formatted prompt string
         """
+
+        # Truncate very long texts to prevent context overflow
+        max_text_length = 8000  # Adjust based on model context window
+        if len(text) > max_text_length:
+            text = text[:max_text_length] + "\n[TRUNCATED]"
+
         tags_str = ", ".join(user_tags)
         
         prompt = f"""You are a PII (Personally Identifiable Information) detection assistant. Your task is to identify all instances of the following PII types in the provided text:
@@ -166,6 +172,7 @@ JSON array:"""
             List of Detection objects
         """
         detections = []
+        used_positions: Dict[str, List[int]] = {}  # Track used start positions per value
         
         for item in detections_data:
             pii_type = item.get('type', 'unknown')
@@ -174,14 +181,20 @@ JSON array:"""
             if not value:
                 continue
             
-            # Find position in text
-            start_pos = text.find(value)
+            # Find position in text, skipping already-used positions
+            search_start = 0
+            if value in used_positions:
+                # Start search after last found position for this value
+                last_pos = used_positions[value][-1]
+                search_start = last_pos + 1
+            
+            start_pos = text.find(value, search_start)
             
             if start_pos == -1:
                 # Try case-insensitive search
                 value_lower = value.lower()
                 text_lower = text.lower()
-                start_pos = text_lower.find(value_lower)
+                start_pos = text_lower.find(value_lower, search_start)
                 
                 if start_pos != -1:
                     # Get actual text at that position
@@ -190,6 +203,11 @@ JSON array:"""
             if start_pos == -1:
                 log.warning(f"SLM detected '{value}' but couldn't find in text")
                 continue
+
+            # Track this position as used
+            if value not in used_positions:
+                used_positions[value] = []
+            used_positions[value].append(start_pos)
             
             end_pos = start_pos + len(value)
             
@@ -226,9 +244,17 @@ JSON array:"""
                 models = response.json().get('models', [])
                 model_names = [m.get('name', '') for m in models]
                 
-                if self.model in model_names or f"{self.model}:latest" in model_names:
-                    log.info(f"Ollama healthy, model {self.model} available")
-                    return True
+                # Check for exact match or prefix match (handles version tags)
+                model_found = any(
+                    name == self.model or 
+                    name.startswith(f"{self.model}:") or
+                    name == f"{self.model}:latest"
+                    for name in model_names
+                )
+                
+                if model_found:
+                     log.info(f"Ollama healthy, model {self.model} available")
+                     return True
                 else:
                     log.warning(f"Model {self.model} not found in Ollama")
                     return False

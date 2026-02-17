@@ -81,9 +81,10 @@ async def root():
 async def global_exception_handler(request, exc):
     """Handle unexpected exceptions"""
     log.error(f"Unexpected error: {str(exc)}", exc_info=True)
-    return HTTPException(
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
         status_code=500,
-        detail={
+        content={
             "error": "InternalServerError",
             "message": "An unexpected error occurred",
             "detail": str(exc) if settings.LOG_LEVEL == "DEBUG" else None
@@ -94,7 +95,7 @@ async def global_exception_handler(request, exc):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
-        "app.main:app",
+         f"{__name__}:app",
         host="0.0.0.0",
         port=8000,
         reload=True,

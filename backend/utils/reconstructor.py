@@ -100,48 +100,28 @@ class PDFReconstructor:
     def _apply_redactions(self, page, detections: List[Detection]):
         """
         Apply black box redactions to a page
-        
+
+        Note: This method is currently not implemented and returns the
+        original page unchanged. Use create_simple_masked_pdf for text-based
+        masking as an alternative.
+
         Args:
             page: PyPDF2 page object
             detections: List of detections for this page
-        
+
         Returns:
             Modified page object
         """
-        # Note: PyPDF2 doesn't have direct redaction support
-        # We'll add black rectangles over detected text
-        
-        # Get page dimensions
-        page_height = float(page.mediabox.height)
-        page_width = float(page.mediabox.width)
-        
-        # Create overlay with black boxes
-        packet = io.BytesIO()
-        can = canvas.Canvas(packet, pagesize=(page_width, page_height))
-        
-        # Set fill color to black
-        can.setFillColor(black)
-        
-        # For each detection, estimate position and draw rectangle
-        # Note: This is simplified - in production, you'd need proper
-        # text position extraction from the PDF
-        for detection in detections:
-            # Simplified position estimation
-            # In a real implementation, you'd extract actual text positions
-            # from the PDF using a library like pdfplumber
-            
-            # For now, we'll create a visible redaction mark
-            # This would need to be replaced with actual position detection
-            pass
-        
-        can.save()
-        
-        # Merge overlay with original page
-        packet.seek(0)
-        # Note: Full implementation would merge the overlay
-        
-        return page
-    
+        log.warning(
+            "PDF redaction not implemented - returning original page. "
+            "Use create_simple_masked_pdf for text-based masking."
+        )
+        # TODO: Implement actual PDF redaction using pdfplumber for text
+        # position extraction and PyPDF2 page merging
+        raise NotImplementedError(
+            "PDF redaction is not yet implemented. "
+            "Use create_simple_masked_pdf as an alternative."
+        )    
     def create_simple_masked_pdf(
         self,
         text_content: str,
@@ -209,8 +189,18 @@ class PDFReconstructor:
         Returns:
             Masked text
         """
+        # Filter detections with valid positions
+        valid_detections = [
+            d for d in detections
+            if d.start_pos is not None 
+            and d.end_pos is not None
+            and d.start_pos >= 0
+            and d.end_pos >= d.start_pos
+            and d.start_pos < len(text)
+        ]
+        
         # Sort detections by position (reverse order to avoid offset issues)
-        sorted_detections = sorted(detections, key=lambda d: d.start_pos, reverse=True)
+        sorted_detections = sorted(valid_detections, key=lambda d: d.start_pos, reverse=True)
         
         # Convert to list for easier manipulation
         text_chars = list(text)
@@ -218,13 +208,12 @@ class PDFReconstructor:
         # Replace each detection with mask characters
         for detection in sorted_detections:
             start = detection.start_pos
-            end = detection.end_pos
+            end = min(detection.end_pos, len(text))  # Clamp to text length
             
             # Replace with black boxes
             mask_length = end - start
             mask = "█" * mask_length
             
             # Apply mask
-            text_chars[start:end] = list(mask)
-        
+            text_chars[start:end] = list(mask)        
         return ''.join(text_chars)

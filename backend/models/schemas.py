@@ -1,11 +1,11 @@
 """
 Pydantic models for API requests and responses
 """
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Dict, Any
 from enum import Enum
 from datetime import datetime
-
+import json
 
 class JobStatus(str, Enum):
     """Job processing status"""
@@ -60,15 +60,14 @@ class UploadRequest(BaseModel):
         description="Optional PII tags to guide detection"
     )
     
-    @validator('tags', pre=True)
+    @field_validator('tags', pre=True)
     def parse_tags(cls, v):
         """Parse tags from string if needed"""
         if isinstance(v, str):
             # Handle JSON string or comma-separated
-            import json
             try:
                 return json.loads(v)
-            except:
+            except json.JSONDecodeError:
                 return [tag.strip() for tag in v.split(',')]
         return v
 

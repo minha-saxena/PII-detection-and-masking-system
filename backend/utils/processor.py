@@ -152,12 +152,14 @@ class PDFProcessor:
             
             # Create output filename
             pdf_name = Path(pdf_path).stem
-            output_path = Path(output_dir) / f"{pdf_name}_extracted.md"
+            output_dir_path = Path(output_dir)
+            output_dir_path.mkdir(parents=True, exist_ok=True)
+            
+            output_path = output_dir_path / f"{pdf_name}_extracted.md"
             
             # Save markdown
             with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(text)
-            
+                f.write(text)            
             # Save metadata
             metadata_path = Path(output_dir) / f"{pdf_name}_metadata.json"
             with open(metadata_path, 'w', encoding='utf-8') as f:

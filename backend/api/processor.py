@@ -18,6 +18,7 @@ from detectors import (
 from masking.masker import MaskingEngine
 from core.config import settings
 from core.logger import log
+import asyncio
 
 
 class PIIProcessor:
@@ -68,9 +69,10 @@ class PIIProcessor:
             
             # Step 1: Extract text from PDF
             log.info("Step 1: Extracting text from PDF...")
-            text, pdf_metadata = self.pdf_processor.extract_text(
+            text, pdf_metadata = await asyncio.to_thread(
+                self.pdf_processor.extract_text,
                 job.original_file_path
-            )
+            )  
             job.metadata['pdf_metadata'] = pdf_metadata
             log.info(f"✓ Extracted {len(text)} characters from {pdf_metadata['num_pages']} pages")
             
@@ -113,6 +115,7 @@ class PIIProcessor:
             
             # Step 4: Create masked PDF
             log.info("Step 4: Creating masked PDF...")
+            os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
             output_path = os.path.join(
                 settings.OUTPUT_DIR,
                 f"{job.job_id}_masked.pdf"
@@ -196,17 +199,35 @@ class PIIProcessor:
                     f"Page {page_data['page_number']}: "
                     f"{len(filtered)} detections"
                 )
-            
             # Store all detections
             for detection in all_detections:
                 job.add_detection(detection)
             
-            # Continue with masking...
-            # (Similar to process_job)
+            # Mask and create output PDF
+            full_text = "\n".join(p['text'] for p in pages_data)
+            masked_text, masking_stats = self.masker.mask_text(
+                full_text, all_detections
+            )
+            job.metadata['masking_stats'] = masking_stats
+
+            output_path = os.path.join(
+                settings.OUTPUT_DIR,
+                f"{job.job_id}_masked.pdf"
+            )
+            os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
+            self.pdf_reconstructor.create_simple_masked_pdf(
+                text_content=full_text,
+                detections=all_detections,
+                output_path=output_path
+            )
+            job.masked_file_path = output_path
+
+            job.update_status(JobStatus.COMPLETED)
+            job.calculate_processing_time()
             
             return job
         
         except Exception as e:
-            log.error(f"Page-by-page processing failed: {str(e)}")
+            log.error(f"Page-by-page processing failed: {str(e)}", exc_info=True)
             job.update_status(JobStatus.FAILED, error_message=str(e))
             raise
