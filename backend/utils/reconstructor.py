@@ -4,124 +4,18 @@ PDF reconstruction with masked content
 from typing import List
 from pathlib import Path
 from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter, A4
-from reportlab.lib.colors import black
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.pagesizes import letter
 from PyPDF2 import PdfReader, PdfWriter
-from PyPDF2.generic import RectangleObject
-import io
 from models.schemas import Detection
 from core.logger import log
 
 
 class PDFReconstructor:
     """Reconstructs PDF with masked PII"""
-    
+
     def __init__(self):
         log.info("PDFReconstructor initialized")
-    
-    def create_masked_pdf(
-        self,
-        original_pdf_path: str,
-        detections: List[Detection],
-        output_path: str,
-        mask_char: str = "█"
-    ) -> str:
-        """
-        Create a new PDF with PII masked using black boxes
-        
-        Args:
-            original_pdf_path: Path to original PDF
-            detections: List of PII detections
-            output_path: Path to save masked PDF
-            mask_char: Character to use for masking (default: black box)
-        
-        Returns:
-            Path to masked PDF
-        """
-        try:
-            log.info(f"Creating masked PDF with {len(detections)} detections")
-            
-            # Read original PDF
-            reader = PdfReader(original_pdf_path)
-            writer = PdfWriter()
-            
-            # Group detections by page
-            detections_by_page = self._group_detections_by_page(detections)
-            
-            # Process each page
-            for page_num in range(len(reader.pages)):
-                page = reader.pages[page_num]
-                
-                # Get detections for this page
-                page_detections = detections_by_page.get(page_num + 1, [])
-                
-                if page_detections:
-                    # Apply redactions to this page
-                    page = self._apply_redactions(page, page_detections)
-                
-                writer.add_page(page)
-            
-            # Write output
-            with open(output_path, 'wb') as output_file:
-                writer.write(output_file)
-            
-            log.info(f"Masked PDF saved to {output_path}")
-            return output_path
-        
-        except Exception as e:
-            log.error(f"PDF reconstruction failed: {str(e)}")
-            raise
-    
-    def _group_detections_by_page(
-        self, 
-        detections: List[Detection]
-    ) -> dict:
-        """
-        Group detections by page number
-        
-        Args:
-            detections: List of detections
-        
-        Returns:
-            Dictionary mapping page_number -> list of detections
-        """
-        by_page = {}
-        
-        for detection in detections:
-            page_num = detection.page_number or 1
-            if page_num not in by_page:
-                by_page[page_num] = []
-            by_page[page_num].append(detection)
-        
-        return by_page
-    
-    def _apply_redactions(self, page, detections: List[Detection]):
-        """
-        Apply black box redactions to a page
 
-        Note: This method is currently not implemented and returns the
-        original page unchanged. Use create_simple_masked_pdf for text-based
-        masking as an alternative.
-
-        Args:
-            page: PyPDF2 page object
-            detections: List of detections for this page
-
-        Returns:
-            Modified page object
-        """
-        log.warning(
-            "PDF redaction not implemented - returning original page. "
-            "Use create_simple_masked_pdf for text-based masking."
-        )
-        # TODO: Implement actual PDF redaction using pdfplumber for text
-        # position extraction and PyPDF2 page merging
-        raise NotImplementedError(
-            "PDF redaction is not yet implemented. "
-            "Use create_simple_masked_pdf as an alternative."
-        )    
     def create_simple_masked_pdf(
         self,
         text_content: str,
@@ -130,90 +24,106 @@ class PDFReconstructor:
         pagesize=letter
     ) -> str:
         """
-        Create a simple PDF from masked text (alternative approach)
-        
+        Create a PDF from masked text with proper page overflow and word-wrap.
+
         Args:
             text_content: Original text content
-            detections: List of detections
-            output_path: Output path
-            pagesize: Page size (default: letter)
-        
+            detections: List of PII detections
+            output_path: Output file path
+            pagesize: Page size tuple (default: letter)
+
         Returns:
             Path to created PDF
         """
         try:
             log.info("Creating simple masked PDF from text")
-            
-            # Apply masking to text
+
             masked_text = self._mask_text(text_content, detections)
-            
-            # Create PDF
+
             can = canvas.Canvas(output_path, pagesize=pagesize)
             width, height = pagesize
-            
-            # Set up text object
-            text_object = can.beginText(50, height - 50)
-            text_object.setFont("Helvetica", 10)
-            
-            # Split text into lines
-            lines = masked_text.split('\n')
-            
-            for line in lines:
-                # Handle page breaks
-                if text_object.getY() < 50:
-                    can.drawText(text_object)
-                    can.showPage()
-                    text_object = can.beginText(50, height - 50)
-                    text_object.setFont("Helvetica", 10)
-                
-                text_object.textLine(line)
-            
-            can.drawText(text_object)
+
+            margin_x = 50
+            margin_top = 50
+            margin_bottom = 50
+            font_name = "Helvetica"
+            font_size = 10
+            line_height = font_size * 1.5
+            max_width = width - 2 * margin_x
+
+            can.setFont(font_name, font_size)
+            y = height - margin_top
+
+            for raw_line in masked_text.split('\n'):
+                # Word-wrap each line
+                wrapped_lines = self._wrap_line(raw_line, max_width, can, font_name, font_size)
+
+                for line in wrapped_lines:
+                    if y < margin_bottom + line_height:
+                        can.showPage()
+                        can.setFont(font_name, font_size)
+                        y = height - margin_top
+
+                    can.drawString(margin_x, y, line)
+                    y -= line_height
+
             can.save()
-            
+
             log.info(f"Simple masked PDF created at {output_path}")
             return output_path
-        
+
         except Exception as e:
             log.error(f"Simple PDF creation failed: {str(e)}")
             raise
-    
+
+    def _wrap_line(
+        self,
+        line: str,
+        max_width: float,
+        can: canvas.Canvas,
+        font_name: str,
+        font_size: int
+    ) -> List[str]:
+        """Word-wrap a line to fit within max_width points."""
+        if not line.strip():
+            return ['']
+
+        words = line.split(' ')
+        result = []
+        current = ''
+
+        for word in words:
+            candidate = f"{current} {word}".strip() if current else word
+            if can.stringWidth(candidate, font_name, font_size) <= max_width:
+                current = candidate
+            else:
+                if current:
+                    result.append(current)
+                # If single word is too long, force it onto its own line
+                current = word
+
+        if current:
+            result.append(current)
+
+        return result if result else ['']
+
     def _mask_text(self, text: str, detections: List[Detection]) -> str:
-        """
-        Apply masking to text content
-        
-        Args:
-            text: Original text
-            detections: List of detections
-        
-        Returns:
-            Masked text
-        """
-        # Filter detections with valid positions
+        """Apply block masking to text at detected positions."""
         valid_detections = [
             d for d in detections
-            if d.start_pos is not None 
+            if d.start_pos is not None
             and d.end_pos is not None
             and d.start_pos >= 0
-            and d.end_pos >= d.start_pos
+            and d.end_pos > d.start_pos
             and d.start_pos < len(text)
         ]
-        
-        # Sort detections by position (reverse order to avoid offset issues)
+
         sorted_detections = sorted(valid_detections, key=lambda d: d.start_pos, reverse=True)
-        
-        # Convert to list for easier manipulation
         text_chars = list(text)
-        
-        # Replace each detection with mask characters
+
         for detection in sorted_detections:
             start = detection.start_pos
-            end = min(detection.end_pos, len(text))  # Clamp to text length
-            
-            # Replace with black boxes
-            mask_length = end - start
-            mask = "█" * mask_length
-            
-            # Apply mask
-            text_chars[start:end] = list(mask)        
+            end = min(detection.end_pos, len(text))
+            text_chars[start:end] = list("█" * (end - start))
+
         return ''.join(text_chars)

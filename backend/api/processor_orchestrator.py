@@ -7,8 +7,8 @@ from datetime import datetime
 
 from models.job import Job
 from models.schemas import JobStatus, Detection
-from pdf_utils.processor import PDFProcessor
-from pdf_utils.reconstructor import PDFReconstructor
+from utils.processor import PDFProcessor
+from utils.reconstructor import PDFReconstructor
 from detectors import (
     DetectorOrchestrator, 
     RegexDetector, 
@@ -25,12 +25,9 @@ class PIIProcessor:
     """Main PII processing pipeline"""
     
     def __init__(self):
-        """Initialize all components"""
-        # Initialize PDF utilities
         self.pdf_processor = PDFProcessor()
         self.pdf_reconstructor = PDFReconstructor()
         
-        # Initialize detectors
         self.orchestrator = DetectorOrchestrator()
         
         if settings.ENABLE_REGEX_DETECTOR:
@@ -45,21 +42,12 @@ class PIIProcessor:
             self.orchestrator.register_detector(SLMDetector())
             log.info("✓ SLMDetector registered")
         
-        # Initialize masking engine
         self.masker = MaskingEngine()
         
         log.info("PIIProcessor initialized with all components")
     
     async def process_job(self, job: Job) -> Job:
-        """
-        Process a complete job from PDF to masked output
-        
-        Args:
-            job: Job object with file path
-        
-        Returns:
-            Updated Job object
-        """
+        """Process a complete job from PDF to masked output"""
         start_time = datetime.now()
         
         try:
@@ -72,20 +60,23 @@ class PIIProcessor:
             text, pdf_metadata = await asyncio.to_thread(
                 self.pdf_processor.extract_text,
                 job.original_file_path
-            )  
+            )
             job.metadata['pdf_metadata'] = pdf_metadata
+
+            # Store extracted text for debugging via report endpoint
+            job.metadata['extracted_text'] = text
+
             log.info(f"✓ Extracted {len(text)} characters from {pdf_metadata['num_pages']} pages")
             
             # Step 2: Detect PII
             log.info("Step 2: Detecting PII...")
             context = {
                 'user_tags': job.user_tags,
-                'page_number': 1  # For multi-page, we'd process page by page
+                'page_number': 1
             }
             
             detections = await self.orchestrator.detect_all(text, context)
             
-            # Filter by confidence threshold
             filtered_detections = [
                 d for d in detections 
                 if d.confidence >= settings.CONFIDENCE_THRESHOLD
@@ -93,7 +84,6 @@ class PIIProcessor:
             
             log.info(f"✓ Found {len(detections)} detections ({len(filtered_detections)} above threshold)")
             
-            # Store detections in job
             for detection in filtered_detections:
                 job.add_detection(detection)
             
@@ -121,8 +111,6 @@ class PIIProcessor:
                 f"{job.job_id}_masked.pdf"
             )
             
-            # Use simple PDF creation (text-based)
-            # In production, use full reconstruction with layout preservation
             self.pdf_reconstructor.create_simple_masked_pdf(
                 text_content=text,
                 detections=filtered_detections,
@@ -132,7 +120,6 @@ class PIIProcessor:
             job.masked_file_path = output_path
             log.info(f"✓ Masked PDF created: {output_path}")
             
-            # Update job status
             job.update_status(JobStatus.COMPLETED)
             job.calculate_processing_time()
             
@@ -150,70 +137,46 @@ class PIIProcessor:
             raise
     
     def _count_by_detector(self, detections: List[Detection]) -> dict:
-        """Count detections by detector"""
         from collections import Counter
         return dict(Counter([d.detector for d in detections]))
     
     async def process_page_by_page(self, job: Job) -> Job:
-        """
-        Alternative: Process PDF page by page for better accuracy
-        
-        Args:
-            job: Job object
-        
-        Returns:
-            Updated Job object
-        """
+        """Alternative: Process PDF page by page for better accuracy"""
         try:
             log.info(f"Processing job {job.job_id} page by page")
             
-            # Extract pages
-            pages_data = self.pdf_processor.extract_by_page(
-                job.original_file_path
-            )
-            
+            pages_data = self.pdf_processor.extract_by_page(job.original_file_path)
             all_detections = []
             
-            # Process each page
             for page_data in pages_data:
                 context = {
                     'user_tags': job.user_tags,
                     'page_number': page_data['page_number']
                 }
                 
-                # Detect PII on this page
                 page_detections = await self.orchestrator.detect_all(
                     page_data['text'],
                     context
                 )
                 
-                # Filter by confidence
                 filtered = [
                     d for d in page_detections 
                     if d.confidence >= settings.CONFIDENCE_THRESHOLD
                 ]
                 
                 all_detections.extend(filtered)
-                
-                log.info(
-                    f"Page {page_data['page_number']}: "
-                    f"{len(filtered)} detections"
-                )
-            # Store all detections
+                log.info(f"Page {page_data['page_number']}: {len(filtered)} detections")
+
             for detection in all_detections:
                 job.add_detection(detection)
             
-            # Mask and create output PDF
             full_text = "\n".join(p['text'] for p in pages_data)
-            masked_text, masking_stats = self.masker.mask_text(
-                full_text, all_detections
-            )
+            job.metadata['extracted_text'] = full_text
+
+            masked_text, masking_stats = self.masker.mask_text(full_text, all_detections)
             job.metadata['masking_stats'] = masking_stats
 
-            output_path = os.path.join(
-                settings.OUTPUT_DIR,
-                f"{job.job_id}_masked.pdf"
-            )
+            output_path = os.path.join(settings.OUTPUT_DIR, f"{job.job_id}_masked.pdf")
             os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
             self.pdf_reconstructor.create_simple_masked_pdf(
                 text_content=full_text,
@@ -221,7 +184,6 @@ class PIIProcessor:
                 output_path=output_path
             )
             job.masked_file_path = output_path
-
             job.update_status(JobStatus.COMPLETED)
             job.calculate_processing_time()
             
