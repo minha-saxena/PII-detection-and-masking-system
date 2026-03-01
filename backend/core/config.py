@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     # Ollama Settings
     OLLAMA_HOST: str = Field(default="http://localhost:11434", env="OLLAMA_HOST")
     OLLAMA_MODEL: str = Field(default="phi3.5", env="OLLAMA_MODEL")
-    OLLAMA_TIMEOUT: int = 120  # seconds
+    OLLAMA_TIMEOUT: int = 500  # seconds
     
     # File Settings
     DATA_DIR: str = "/app/data"

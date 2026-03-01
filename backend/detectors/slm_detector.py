@@ -24,55 +24,74 @@ class SLMDetector(BaseDetector):
     async def detect(self, text: str, context: Dict[str, Any] = None) -> List[Detection]:
         """
         Detect PII using SLM with user-provided tags as hints
-        
-        Args:
-            text: Text to analyze
-            context: Context including user_tags and page_number
-        
-        Returns:
-            List of Detection objects
         """
-        if not context or not context.get('user_tags'):
-            log.debug("SLMDetector: No user tags provided, skipping SLM detection")
-            return []
-        
-        user_tags = context.get('user_tags', [])
-        page_number = context.get('page_number')
+        user_tags = context.get('user_tags') if context else None
+
+        if not user_tags:
+            from core.config import settings
+            user_tags = settings.DEFAULT_PII_TAGS
+            log.info(f"SLMDetector: No tags provided, using defaults: {user_tags}")
+
+        page_number = context.get('page_number') if context else None
         
         log.debug(f"SLMDetector: Analyzing with tags: {user_tags}")
         
-        # Build prompt
-        prompt = self._build_prompt(text, user_tags)
+        # Process text in chunks to avoid timeout on long documents
+        all_detections = []
+        chunks = self._split_text(text)
         
-        # Call Ollama API
-        try:
-            detections_data = await self._call_ollama(prompt)
-            detections = self._parse_response(detections_data, text, page_number)
-            
-            log.info(f"SLMDetector: Found {len(detections)} context-aware matches")
-            return detections
+        log.info(f"SLMDetector: Processing {len(chunks)} chunk(s)")
+
+        for i, chunk in enumerate(chunks):
+            try:
+                prompt = self._build_prompt(chunk['text'], user_tags)
+                detections_data = await self._call_ollama(prompt)
+                chunk_detections = self._parse_response(
+                    detections_data, 
+                    text,           # use full text for position finding
+                    page_number,
+                    chunk_offset=chunk['offset']
+                )
+                all_detections.extend(chunk_detections)
+                log.info(f"SLMDetector: Chunk {i+1}/{len(chunks)} → {len(chunk_detections)} matches")
+
+            except Exception as e:
+                log.error(f"SLMDetector failed on chunk {i+1}: {type(e).__name__}: {str(e)}")
+                continue
         
-        except Exception as e:
-            log.error(f"SLMDetector failed: {str(e)}")
-            return []
+        log.info(f"SLMDetector: Found {len(all_detections)} context-aware matches total")
+        return all_detections
     
+    def _split_text(self, text: str, chunk_size: int = 2000) -> List[Dict]:
+        """
+        Split text into chunks for faster SLM processing.
+        Splits on newlines where possible to avoid cutting mid-sentence.
+        """
+        if len(text) <= chunk_size:
+            return [{'text': text, 'offset': 0}]
+
+        chunks = []
+        start = 0
+
+        while start < len(text):
+            end = start + chunk_size
+
+            if end >= len(text):
+                chunks.append({'text': text[start:], 'offset': start})
+                break
+
+            # Try to split on a newline boundary
+            split_pos = text.rfind('\n', start, end)
+            if split_pos == -1 or split_pos <= start:
+                split_pos = end  # fallback to hard cut
+
+            chunks.append({'text': text[start:split_pos], 'offset': start})
+            start = split_pos + 1
+
+        return chunks
+
     def _build_prompt(self, text: str, user_tags: List[str]) -> str:
-        """
-        Build prompt for the SLM
-        
-        Args:
-            text: Text to analyze
-            user_tags: User-provided PII tags
-        
-        Returns:
-            Formatted prompt string
-        """
-
-        # Truncate very long texts to prevent context overflow
-        max_text_length = 8000  # Adjust based on model context window
-        if len(text) > max_text_length:
-            text = text[:max_text_length] + "\n[TRUNCATED]"
-
+        """Build prompt for the SLM"""
         tags_str = ", ".join(user_tags)
         
         prompt = f"""You are a PII (Personally Identifiable Information) detection assistant. Your task is to identify all instances of the following PII types in the provided text:
@@ -107,24 +126,16 @@ JSON array:"""
         return prompt
     
     async def _call_ollama(self, prompt: str) -> List[Dict[str, str]]:
-        """
-        Call Ollama API for inference
-        
-        Args:
-            prompt: Formatted prompt
-        
-        Returns:
-            Parsed JSON response
-        """
+        """Call Ollama API for inference"""
         url = f"{self.ollama_host}/api/generate"
         
         payload = {
             "model": self.model,
             "prompt": prompt,
             "stream": False,
-            "format": "json",  # Request JSON output
+            "format": "json",
             "options": {
-                "temperature": 0.1,  # Low temperature for more deterministic output
+                "temperature": 0.1,
                 "top_p": 0.9,
             }
         }
@@ -136,9 +147,7 @@ JSON array:"""
             result = response.json()
             response_text = result.get('response', '[]')
             
-            # Parse JSON from response
             try:
-                # Remove any markdown code blocks if present
                 response_text = response_text.strip()
                 if response_text.startswith('```'):
                     response_text = response_text.split('```')[1]
@@ -147,9 +156,11 @@ JSON array:"""
                     response_text = response_text.strip()
                 
                 detections_data = json.loads(response_text)
+                log.info(f"SLM raw response: {response_text[:500]}")
                 return detections_data if isinstance(detections_data, list) else []
             
             except json.JSONDecodeError as e:
+                log.info(f"SLM raw response: {response_text[:500]}")
                 log.error(f"Failed to parse SLM response as JSON: {e}")
                 log.debug(f"Response text: {response_text}")
                 return []
@@ -158,21 +169,12 @@ JSON array:"""
         self, 
         detections_data: List[Dict[str, str]], 
         text: str, 
-        page_number: int = None
+        page_number: int = None,
+        chunk_offset: int = 0
     ) -> List[Detection]:
-        """
-        Parse SLM response into Detection objects
-        
-        Args:
-            detections_data: List of detection dicts from SLM
-            text: Original text (to find positions)
-            page_number: Page number if available
-        
-        Returns:
-            List of Detection objects
-        """
+        """Parse SLM response into Detection objects"""
         detections = []
-        used_positions: Dict[str, List[int]] = {}  # Track used start positions per value
+        used_positions: Dict[str, List[int]] = {}
         
         for item in detections_data:
             pii_type = item.get('type', 'unknown')
@@ -181,12 +183,11 @@ JSON array:"""
             if not value:
                 continue
             
-            # Find position in text, skipping already-used positions
-            search_start = 0
+            # Find position in full text, skipping already-used positions
+            search_start = chunk_offset
             if value in used_positions:
-                # Start search after last found position for this value
                 last_pos = used_positions[value][-1]
-                search_start = last_pos + 1
+                search_start = max(chunk_offset, last_pos + 1)
             
             start_pos = text.find(value, search_start)
             
@@ -195,31 +196,25 @@ JSON array:"""
                 value_lower = value.lower()
                 text_lower = text.lower()
                 start_pos = text_lower.find(value_lower, search_start)
-                
                 if start_pos != -1:
-                    # Get actual text at that position
                     value = text[start_pos:start_pos + len(value)]
             
             if start_pos == -1:
                 log.warning(f"SLM detected '{value}' but couldn't find in text")
                 continue
 
-            # Track this position as used
             if value not in used_positions:
                 used_positions[value] = []
             used_positions[value].append(start_pos)
             
             end_pos = start_pos + len(value)
             
-            # SLM detections have slightly lower confidence since they're context-based
-            confidence = 0.85
-            
             detection = self._create_detection(
                 pii_type=pii_type,
                 value=value,
                 start_pos=start_pos,
                 end_pos=end_pos,
-                confidence=confidence,
+                confidence=0.85,
                 page_number=page_number
             )
             detections.append(detection)
@@ -227,12 +222,7 @@ JSON array:"""
         return detections
     
     async def check_ollama_health(self) -> bool:
-        """
-        Check if Ollama service is available
-        
-        Returns:
-            True if available, False otherwise
-        """
+        """Check if Ollama service is available"""
         try:
             url = f"{self.ollama_host}/api/tags"
             
@@ -240,11 +230,9 @@ JSON array:"""
                 response = await client.get(url)
                 response.raise_for_status()
                 
-                # Check if our model is available
                 models = response.json().get('models', [])
                 model_names = [m.get('name', '') for m in models]
                 
-                # Check for exact match or prefix match (handles version tags)
                 model_found = any(
                     name == self.model or 
                     name.startswith(f"{self.model}:") or
@@ -253,12 +241,12 @@ JSON array:"""
                 )
                 
                 if model_found:
-                     log.info(f"Ollama healthy, model {self.model} available")
-                     return True
+                    log.info(f"Ollama healthy, model {self.model} available")
+                    return True
                 else:
                     log.warning(f"Model {self.model} not found in Ollama")
                     return False
         
         except Exception as e:
-            log.error(f"Ollama health check failed: {str(e)}")
+            log.error(f"Ollama health check failed: {type(e).__name__}: {str(e)}")
             return False

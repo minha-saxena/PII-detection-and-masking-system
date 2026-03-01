@@ -15,24 +15,25 @@ class NERDetector(BaseDetector):
     ENTITY_TYPE_MAPPING = {
         "PERSON": "name",
         "ORG": "organization",
-        "GPE": "location",  # Geo-Political Entity
+        "GPE": "location",
         "LOC": "location",
         "DATE": "date",
         "MONEY": "financial",
         "CARDINAL": "number",
         "ORDINAL": "number",
     }
+
+    # Only keep entity types that are genuinely PII
+    ALLOWED_ENTITY_TYPES = {"PERSON", "GPE", "LOC", "DATE", "MONEY"}
     
-    def __init__(self, model_name: str = "en_core_web_trf"):
+    def __init__(self, model_name: str = "en_core_web_sm"):
         super().__init__(name="ner")
-        
         try:
             log.info(f"Loading spaCy model: {model_name}")
             self.nlp = spacy.load(model_name)
             log.info("spaCy model loaded successfully")
         except OSError:
-            log.warning(f"spaCy model {model_name} not found. Falling back to en_core_web_sm...")
-            # Fallback to smaller model if transformer not available
+            log.warning(f"spaCy model {model_name} not found, falling back to en_core_web_sm...")
             try:
                 self.nlp = spacy.load("en_core_web_sm")
                 log.warning("Using en_core_web_sm as fallback")
@@ -43,11 +44,11 @@ class NERDetector(BaseDetector):
     async def detect(self, text: str, context: Dict[str, Any] = None) -> List[Detection]:
         """
         Detect PII using NER
-        
+
         Args:
             text: Text to analyze
             context: Optional context (page_number, etc.)
-        
+
         Returns:
             List of Detection objects
         """
@@ -56,20 +57,32 @@ class NERDetector(BaseDetector):
         
         log.debug(f"NERDetector: Processing {len(text)} characters")
         
-        # Process text with spaCy
-        doc = await asyncio.to_thread(self.nlp, text)     
+        doc = await asyncio.to_thread(self.nlp, text)
+        
         for ent in doc.ents:
-            # Map spaCy entity type to our PII type
+            # Skip entity types that aren't genuinely PII
+            if ent.label_ not in self.ALLOWED_ENTITY_TYPES:
+                continue
+
+            # Strip whitespace from entity text and adjust positions accordingly
+            original_text = ent.text
+            stripped_text = original_text.strip()
+
+            if not stripped_text or len(stripped_text) < 3:
+                continue
+
+            leading_spaces = len(original_text) - len(original_text.lstrip())
+            start_pos = ent.start_char + leading_spaces
+            end_pos = start_pos + len(stripped_text)
+
             pii_type = self.ENTITY_TYPE_MAPPING.get(ent.label_, ent.label_.lower())
-            
-            # Calculate confidence based on entity type and length
-            confidence = self._calculate_confidence(ent)
+            confidence = self._calculate_confidence(ent, stripped_text)
             
             detection = self._create_detection(
                 pii_type=pii_type,
-                value=ent.text,
-                start_pos=ent.start_char,
-                end_pos=ent.end_char,
+                value=stripped_text,
+                start_pos=start_pos,
+                end_pos=end_pos,
                 confidence=confidence,
                 page_number=page_number
             )
@@ -78,40 +91,21 @@ class NERDetector(BaseDetector):
         log.info(f"NERDetector: Found {len(detections)} entities")
         return detections
     
-    def _calculate_confidence(self, entity) -> float:
-        """
-        Calculate confidence score for an entity
-        
-        Args:
-            entity: spaCy entity object
-        
-        Returns:
-            Confidence score between 0.0 and 1.0
-        """
-        # Base confidence on entity type
+    def _calculate_confidence(self, entity, stripped_text: str = None) -> float:
+        """Calculate confidence score for an entity"""
         base_confidence = {
             "PERSON": 0.9,
-            "ORG": 0.85,
             "GPE": 0.8,
             "LOC": 0.8,
             "DATE": 0.7,
             "MONEY": 0.75,
         }.get(entity.label_, 0.7)
         
-        # Adjust based on entity length (very short entities less reliable)
-        length_factor = min(len(entity.text) / 10.0, 1.0)
+        text_to_check = stripped_text if stripped_text else entity.text
+        length_factor = min(len(text_to_check) / 10.0, 1.0)
+        cap_factor = 1.0 if (text_to_check and text_to_check[0].isupper()) else 0.9
         
-        # Adjust based on capitalization (proper nouns more reliable)
-        if entity.text and entity.text[0].isupper():
-            cap_factor = 1.0
-        else:
-            cap_factor = 0.9
-        
-        # Combine factors
-        confidence = base_confidence * (0.7 + 0.3 * length_factor) * cap_factor
-        
-        return min(confidence, 1.0)
+        return min(base_confidence * (0.7 + 0.3 * length_factor) * cap_factor, 1.0)
     
     def get_supported_entities(self) -> List[str]:
-        """Get list of entity types the model can detect"""
         return list(self.nlp.pipe_labels.get('ner', []))

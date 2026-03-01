@@ -20,14 +20,14 @@ services:
   # FastAPI application
   api:
     build:
-      context: .
-      dockerfile: backend/Dockerfile    
-      container_name: pii-masker-api
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pii-masker-api
     ports:
       - "8000:8000"
     volumes:
       - ./data:/app/data
-      - ./backend:/app  # For development hot-reload
+      - rapidocr-models:/usr/local/lib/python3.11/site-packages/rapidocr/models
     environment:
       - OLLAMA_HOST=http://ollama:11434
       - OLLAMA_MODEL=phi3.5
@@ -35,13 +35,15 @@ services:
       - LOG_LEVEL=INFO
     depends_on:
       ollama:
-        condition: service_healthy    
-        networks:
-          - pii-masker-net
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+        condition: service_healthy
+    networks:
+      - pii-masker-net
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 
 volumes:
   ollama-models:
+    driver: local
+  rapidocr-models:      
     driver: local
 
 networks:

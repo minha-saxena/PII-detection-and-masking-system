@@ -60,7 +60,7 @@ class UploadRequest(BaseModel):
         description="Optional PII tags to guide detection"
     )
     
-    @field_validator('tags', pre=True)
+    @field_validator('tags', mode='before')
     def parse_tags(cls, v):
         """Parse tags from string if needed"""
         if isinstance(v, str):
